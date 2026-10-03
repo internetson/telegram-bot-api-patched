@@ -214,14 +214,39 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Создание мультиархитектурного манифеста
+        env:
+          # Теги берём из выхода metadata-action. Ориентироваться на переменную
+          # DOCKER_METADATA_JSON нельзя: её нет ни в v5, ни в v6, и при set -u
+          # шаг падал с "DOCKER_METADATA_JSON: unbound variable".
+          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
-          set -euo pipefail
+          set -eo pipefail
+
+          # outputs.tags — многострочная строка, каждый тег на своей строке.
+          # Превращаем её в массив пар "-t <тег>".
+          tags_args=()
+          while IFS= read -r tag; do
+            if [ -n "$tag" ]; then
+              tags_args+=("-t" "$tag")
+            fi
+          done <<< "$TAGS"
+
+          if [ ${#tags_args[@]} -eq 0 ]; then
+            echo "::error::metadata-action не вернул ни одного тега"
+            exit 1
+          fi
+          echo "Публикуем теги: ${tags_args[*]}"
+
           docker buildx imagetools create \
             $(cat /tmp/digests/sources.txt) \
-            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_JSON")
-          # Печатаем итоговые теги, чтобы было видно, что опубликовано.
-          docker buildx imagetools inspect \
-            $(jq -r '.tags[0]' <<< "$DOCKER_METADATA_JSON") | head -20
+            "${tags_args[@]}"
+
+          # Печатаем платформы, попавшие в манифест: так видно, что образ
+          # действительно мультиархитектурный, а не одна нога.
+          first_tag="${tags_args[1]}"
+          docker buildx imagetools inspect --raw "$first_tag" > /tmp/manifest.json
+          python3 -c 'import json; d = json.load(open("/tmp/manifest.json")); [print("  платформа:", p.get("os", "?"), p.get("architecture", "?"), p.get("variant", "")) for p in (m.get("platform", {}) for m in d.get("manifests", []))]'
+          echo "Манифест $first_tag создан"
 
       - name: Загрузка артефакта с итоговым списком источников
         uses: actions/upload-artifact@v7
