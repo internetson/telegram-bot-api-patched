@@ -1,10 +1,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Сборка и публикация Docker-образа Telegram Bot API.
 #
-# Сборка запускается автоматически после каждого коммита в main и в PR.
-# Компиляция TDLib тяжёлая, поэтому каждый архитектурный вариант собирается на
-# своём нативном раннере (без QEMU-эмуляции там, где она не нужна), а в конце
-# собирается единый мультиархитектурный манифест.
+# Компиляция TDLib тяжёлая (15–20 минут), поэтому:
+#   - при пуше в main собираются обе архитектуры (amd64 и нативный arm64),
+#     затем собирается мультиархитектурный манифест и прогоняется smoke-тест;
+#   - в pull_request собирается только amd64 — этого достаточно, чтобы
+#     проверить Dockerfile и патч, не тратя ~30 минут CI.
 #
 # Ручной запуск: вкладка Actions → Docker Image → Run workflow, там можно
 # указать ветку апстрима telegram-bot-api и значение таймаута.
@@ -43,47 +44,42 @@ env:
   # inputs пуст при push/pull_request, поэтому нужен запасной вариант.
   TGBOTAPI_REF: ${{ inputs.tgbotapi_ref || 'master' }}
   TGBOTAPI_IDLE_TIMEOUT: ${{ inputs.idle_timeout || '14400' }}
+  # Матрицы сборки. В PR достаточно одной архитектуры, при пуше в main нужны обе.
+  # Раннеры зафиксированы на ubuntu-24.04: метка ubuntu-latest переезжает на
+  # Ubuntu 26, и такое тихое изменение ОС ломает сборки без предупреждения.
+  RUNNER_AMD64: 'ubuntu-24.04'
+  RUNNER_ARM64: 'ubuntu-24.04-arm'
+  MATRIX_PR: '[{"slug":"amd64","platform":"linux/amd64"}]'
+  MATRIX_PUSH: >-
+    [{"slug":"amd64","platform":"linux/amd64"},{"slug":"arm64","platform":"linux/arm64"}]
 
 jobs:
   build:
     name: Сборка ${{ matrix.platform }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.slug == 'arm64' && env.RUNNER_ARM64 || env.RUNNER_AMD64 }}
     timeout-minutes: 300
 
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - slug: amd64
-            platform: linux/amd64
-            runner: ubuntu-latest
-          - slug: arm64
-            platform: linux/arm64
-            # Нативный ARM-раннер: компиляция идёт без эмуляции.
-            runner: ubuntu-24.04-arm
-          # Если нужна поддержка 32-битных ARM-устройств (Raspberry Pi 1/2/3),
-          # раскомментируйте блок ниже: сборка пойдёт через QEMU и заметно
-          # медленнее, зато манифест соберётся автоматически.
-          # - slug: armv7
-          #   platform: linux/arm/v7
-          #   runner: ubuntu-latest
+        include: ${{ fromJSON(github.event_name == 'pull_request' && env.MATRIX_PR || env.MATRIX_PUSH) }}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Подготовка QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Подготовка Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Определение числа ядер
         run: echo "NPROC=$(nproc)" >> "$GITHUB_ENV"
 
       - name: Логин в GitHub Container Registry
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -91,7 +87,7 @@ jobs:
 
       - name: Метаданные образа
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
@@ -104,7 +100,7 @@ jobs:
 
       - name: Сборка ${{ matrix.platform }}
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
@@ -114,8 +110,8 @@ jobs:
             TGBOTAPI_REF=${{ env.TGBOTAPI_REF }}
             TGBOTAPI_IDLE_TIMEOUT=${{ env.TGBOTAPI_IDLE_TIMEOUT }}
             nproc=${{ env.NPROC }}
-          # Пушим по дигесту: манифест собирается отдельным шагом после того,
-          # как все архитектуры будут собраны.
+          # Пушим по дигесту: мультиархитектурный манифест собирается отдельным
+          # шагом после того, как успешно собраны все архитектуры.
           outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.slug }}
@@ -127,49 +123,69 @@ jobs:
         if: github.event_name != 'pull_request'
         run: |
           mkdir -p /tmp/digests
-          touch "/tmp/digests/${{ matrix.slug }}.txt"
-          echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.slug }}.txt"
+          echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/digest-${{ matrix.slug }}.txt"
+          cat "/tmp/digests/digest-${{ matrix.slug }}.txt"
 
       - name: Загрузка артефакта с дигестом
         if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digest-${{ matrix.slug }}
-          path: /tmp/digests/${{ matrix.slug }}.txt
+          # Имя файла ВНУТРИ артефакта должно совпадать с шаблоном digest-*.txt
+          # в job'е merge: download-artifact с merge-multiple раскладывает
+          # файлы как есть, без имени артефакта.
+          path: /tmp/digests/digest-${{ matrix.slug }}.txt
+          if-no-files-found: error
           retention-days: 1
 
   merge:
     name: Сборка манифеста
     needs: build
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Подготовка Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Скачивание дигестов
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
-          # Файлы из всех артефактов складываются в один каталог, иначе merge
-          # не найдёт digest-*.txt.
           pattern: digest-*
           merge-multiple: true
 
       - name: Объединение дигестов
         run: |
+          set -euo pipefail
           cd /tmp/digests
+
+          # nullglob: если шаблон ничего не нашёл, массив будет пустым, а не
+          # станет раскрываться в буквальное имя файла. Иначе cat ниже упал бы
+          # с непонятным "No such file or directory".
+          shopt -s nullglob
+          digest_files=(digest-*.txt)
+          if [ ${#digest_files[@]} -eq 0 ]; then
+            echo "::error::не найдено ни одного файла digest-*.txt"
+            ls -la /tmp/digests
+            exit 1
+          fi
+
           sources=""
-          for digest_file in digest-*.txt; do
+          for digest_file in "${digest_files[@]}"; do
             digest=$(cat "$digest_file")
+            if [ -z "${digest}" ]; then
+              echo "::error::в ${digest_file} пустой дигест"
+              exit 1
+            fi
             echo "Используем дигест из ${digest_file}: ${digest}"
             sources="${sources} ${IMAGE_NAME}@${digest}"
           done
+
           # Обрезаем ведущий пробел, чтобы результат можно было подставить
           # через $(cat ...) без лишнего пустого аргумента.
           echo "${sources# }" > sources.txt
@@ -177,7 +193,7 @@ jobs:
 
       - name: Метаданные образа
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
@@ -188,7 +204,7 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Логин в GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -196,12 +212,16 @@ jobs:
 
       - name: Создание мультиархитектурного манифеста
         run: |
+          set -euo pipefail
           docker buildx imagetools create \
             $(cat /tmp/digests/sources.txt) \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_JSON")
+          # Печатаем итоговые теги, чтобы было видно, что опубликовано.
+          docker buildx imagetools inspect \
+            $(jq -r '.tags[0]' <<< "$DOCKER_METADATA_JSON") | head -20
 
-      - name: Загрузка артефакта с итоговым манифестом
-        uses: actions/upload-artifact@v4
+      - name: Загрузка артефакта с итоговым списком источников
+        uses: actions/upload-artifact@v7
         with:
           name: metadata
           path: /tmp/digests/sources.txt
@@ -209,25 +229,26 @@ jobs:
   smoke:
     name: Проверка запуска
     needs: build
-    # Проверка нужна и тогда, когда сборка упала: она повторяет сборку из кэша
-    # или сама доходит до ошибки и показывает её раньше, чем разберётся merge.
-    if: always() && needs.build.result != 'cancelled'
-    runs-on: ubuntu-latest
+    # Только при пуше в main: там сборка уже прогрелась и лежит в кэше, поэтому
+    # повторная сборка занимает секунды. В PR кэш недоступен, и проверка
+    # удвоила бы время CI.
+    if: always() && github.event_name != 'pull_request' && needs.build.result != 'cancelled'
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Подготовка Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Определение числа ядер
         run: echo "NPROC=$(nproc)" >> "$GITHUB_ENV"
 
-      # Сборка повторно не нужна: забираем кэш, который выгрузил job build.
+      # Компиляция берётся из кэша, который выгрузил job build.
       - name: Сборка образа для проверки
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile

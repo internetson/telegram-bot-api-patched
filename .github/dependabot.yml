@@ -7,6 +7,13 @@ updates:
     schedule:
       interval: weekly
     labels:
+      - ci
       - dependencies
     commit-message:
       prefix: 'ci'
+    # Все обновления экшенов приезжают одним PR: каждый PR здесь запускает
+    # полную сборку образа, а поодиночке на пять экшенов это пять прогонов CI.
+    groups:
+      github-actions:
+        patterns:
+          - '*'

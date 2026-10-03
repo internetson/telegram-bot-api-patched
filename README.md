@@ -143,12 +143,22 @@ docker build -t telegram-bot-api-patched:local \
 
 Сборка запускается автоматически после каждого коммита в `main` и каждого PR:
 
-- **`amd64`** собирается на обычном раннере, **`arm64`** — на нативном ARM-раннере
-  (`ubuntu-24.04-arm`), то есть без эмуляции;
+| Событие | Что собирается | Время |
+| --- | --- | --- |
+| Коммит в `main` | `amd64` + `arm64`, затем манифест и smoke-тест | ~20 мин |
+| Pull request | только `amd64` — этого хватает для проверки Dockerfile и патча | ~17 мин |
+
+Подробности:
+
+- **`arm64`** собирается на нативном ARM-раннере (`ubuntu-24.04-arm`), то есть без
+  QEMU-эмуляции; сборка идёт в отдельном job и публикуется по дигесту;
+- если хотя бы одна архитектура не собралась, манифест **не создаётся** —
+  в реестр не попадает битый образ;
 - кэш сборки хранится в GitHub Actions Cache, повторные прогоны заметно быстрее;
-- образ публикуется в GitHub Container Registry как мультиархитектурный манифест;
-- отдельная задача `smoke` проверяет, что бинарник запускается, а entrypoint
-  корректно отвергает запуск без учётных данных.
+- задача `Проверка запуска` убеждается, что бинарник стартует, а entrypoint
+  корректно отвергает запуск без учётных данных (берёт готовую сборку из кэша,
+  поэтому занимает секунды);
+- версии экшенов обновляет Dependabot, собирая все обновления в один PR.
 
 Теги образа:
 
@@ -284,12 +294,23 @@ count; CI caches it between runs.
 
 Every commit to `main` and every pull request triggers a build:
 
-- **`amd64`** builds on a standard runner, **`arm64`** on a native ARM runner
-  (`ubuntu-24.04-arm`), so no emulation is involved;
-- the build cache is stored in GitHub Actions Cache;
-- the image is published to GitHub Container Registry as a multi-platform manifest;
-- a separate `smoke` job verifies that the binary runs and that the entrypoint
-  refuses to start without credentials.
+| Event | What is built | Time |
+| --- | --- | --- |
+| Push to `main` | `amd64` + `arm64`, then the manifest and the smoke test | ~20 min |
+| Pull request | `amd64` only — enough to validate the Dockerfile and the patch | ~17 min |
+
+Notes:
+
+- **`arm64`** builds on a native ARM runner (`ubuntu-24.04-arm`), so no QEMU
+  emulation is involved;
+- if any architecture fails, the manifest is **not** created, so a broken image
+  never reaches the registry;
+- the build cache lives in GitHub Actions Cache, making repeat runs much faster;
+- the `Проверка запуска` (smoke) job verifies the binary starts and that the
+  entrypoint refuses to run without credentials — it reuses the cached build and
+  takes seconds;
+- Dependabot keeps the action versions current and groups all bumps into a
+  single pull request.
 
 Image tags: `latest` and `main` for commits to `main`, `sha-<commit>` for every
 commit, and `v1.2.3` / `v1.2` / `v1` for `v*` repository tags. Manual runs with
