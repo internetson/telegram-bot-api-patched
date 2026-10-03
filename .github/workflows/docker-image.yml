@@ -132,7 +132,7 @@ jobs:
 
       - name: Загрузка артефакта с дигестом
         if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digest-${{ matrix.slug }}
           path: /tmp/digests/${{ matrix.slug }}.txt
@@ -201,7 +201,7 @@ jobs:
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_JSON")
 
       - name: Загрузка артефакта с итоговым манифестом
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: metadata
           path: /tmp/digests/sources.txt
