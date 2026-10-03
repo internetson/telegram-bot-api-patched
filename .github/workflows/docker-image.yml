@@ -73,7 +73,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Подготовка QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Подготовка Buildx
         uses: docker/setup-buildx-action@v3
