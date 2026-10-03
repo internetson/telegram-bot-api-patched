@@ -1,0 +1,12 @@
+# Автоматические обновления GitHub Actions.
+# Сборка опирается на сторонние экшены (docker/*), поэтому за ними нужно следить.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+    commit-message:
+      prefix: 'ci'

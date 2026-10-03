@@ -1,0 +1,21 @@
+# Нормализация переводов строк
+#
+# Это критично для docker-entrypoint.sh: если файл попадёт в образ с CRLF,
+# shebang превратится в "#!/usr/bin/env sh\r" и контейнер упадёт с
+# "exec format error". Принудительно LF для всех текстовых файлов.
+* text=auto eol=lf
+
+*.sh text eol=lf
+Dockerfile text eol=lf
+.dockerfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+
+# Бинарные файлы не трогаем
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.gz binary

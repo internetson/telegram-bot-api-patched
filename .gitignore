@@ -1,0 +1,28 @@
+# Служебные файлы ОС
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Редакторы и IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Логи и временные файлы
+*.log
+*.tmp
+*.bak
+
+# Локальные файлы настроек / секретов
+.env
+.env.*
+!.env.example
+secrets/
+*.local.yml
+*.local.yaml
+
+# Каталоги сборки (на случай сборки вне Docker)
+build/
+cmake-build-*/

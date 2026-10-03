@@ -1,0 +1,40 @@
+# Пример запуска Telegram Bot API с увеличенным таймаутом простоя соединения.
+#
+# Запуск:  docker compose up -d
+# Перед запуском заполните .env (скопируйте .env.example) или задайте
+# TELEGRAM_API_ID / TELEGRAM_API_HASH прямо здесь.
+
+services:
+  telegram-bot-api:
+    image: ghcr.io/internetson/telegram-bot-api-patched:latest
+    # Сборка из локального Dockerfile вместо готового образа:
+    # build:
+    #   context: .
+    #   args:
+    #     TGBOTAPI_IDLE_TIMEOUT: "14400"
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      TELEGRAM_API_ID: "${TELEGRAM_API_ID:?задайте TELEGRAM_API_ID в .env}"
+      TELEGRAM_API_HASH: "${TELEGRAM_API_HASH:?задайте TELEGRAM_API_HASH в .env}"
+      TELEGRAM_HTTP_PORT: "8081"
+      TELEGRAM_WORK_DIR: "/var/lib/telegram-bot-api"
+      TELEGRAM_TEMP_DIR: "/tmp/telegram-bot-api"
+      TELEGRAM_VERBOSITY: "2"
+    volumes:
+      # Каталог с базой и локальными файлами. uid/gid 101 — непривилегированный
+      # пользователь внутри образа, поэтому на хосте он должен принадлежать
+      # пользователю с id 101 (либо используйте user_map в Compose-файле).
+      - tgbotapi-data:/var/lib/telegram-bot-api
+    healthcheck:
+      # У Telegram Bot API нет публичного метода /health, поэтому проверяем,
+      # что процесс слушает HTTP-порт (nc из busybox есть в образе).
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 ${TELEGRAM_HTTP_PORT:-8081}"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  tgbotapi-data:

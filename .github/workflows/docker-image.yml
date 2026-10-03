@@ -1,0 +1,257 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Сборка и публикация Docker-образа Telegram Bot API.
+#
+# Сборка запускается автоматически после каждого коммита в main и в PR.
+# Компиляция TDLib тяжёлая, поэтому каждый архитектурный вариант собирается на
+# своём нативном раннере (без QEMU-эмуляции там, где она не нужна), а в конце
+# собирается единый мультиархитектурный манифест.
+#
+# Ручной запуск: вкладка Actions → Docker Image → Run workflow, там можно
+# указать ветку апстрима telegram-bot-api и значение таймаута.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Docker Image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tgbotapi_ref:
+        description: 'Ветка/тег апстрима telegram-bot-api (TGBOTAPI_REF)'
+        required: false
+        default: 'master'
+      idle_timeout:
+        description: 'Таймаут простоя HTTP-соединения, секунды (TGBOTAPI_IDLE_TIMEOUT)'
+        required: false
+        default: '14400'
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+  ALPINE_VERSION: '3.20'
+  # inputs пуст при push/pull_request, поэтому нужен запасной вариант.
+  TGBOTAPI_REF: ${{ inputs.tgbotapi_ref || 'master' }}
+  TGBOTAPI_IDLE_TIMEOUT: ${{ inputs.idle_timeout || '14400' }}
+
+jobs:
+  build:
+    name: Сборка ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 300
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - slug: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - slug: arm64
+            platform: linux/arm64
+            # Нативный ARM-раннер: компиляция идёт без эмуляции.
+            runner: ubuntu-24.04-arm
+          # Если нужна поддержка 32-битных ARM-устройств (Raspberry Pi 1/2/3),
+          # раскомментируйте блок ниже: сборка пойдёт через QEMU и заметно
+          # медленнее, зато манифест соберётся автоматически.
+          # - slug: armv7
+          #   platform: linux/arm/v7
+          #   runner: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Подготовка QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Подготовка Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Определение числа ядер
+        run: echo "NPROC=$(nproc)" >> "$GITHUB_ENV"
+
+      - name: Логин в GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Метаданные образа
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Сборка ${{ matrix.platform }}
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            ALPINE_VERSION=${{ env.ALPINE_VERSION }}
+            TGBOTAPI_REF=${{ env.TGBOTAPI_REF }}
+            TGBOTAPI_IDLE_TIMEOUT=${{ env.TGBOTAPI_IDLE_TIMEOUT }}
+            nproc=${{ env.NPROC }}
+          # Пушим по дигесту: манифест собирается отдельным шагом после того,
+          # как все архитектуры будут собраны.
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.slug }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.slug }}
+
+      - name: Сохранение дигеста
+        if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${{ matrix.slug }}.txt"
+          echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.slug }}.txt"
+
+      - name: Загрузка артефакта с дигестом
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.slug }}
+          path: /tmp/digests/${{ matrix.slug }}.txt
+          retention-days: 1
+
+  merge:
+    name: Сборка манифеста
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Подготовка Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Скачивание дигестов
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          # Файлы из всех артефактов складываются в один каталог, иначе merge
+          # не найдёт digest-*.txt.
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Объединение дигестов
+        run: |
+          cd /tmp/digests
+          sources=""
+          for digest_file in digest-*.txt; do
+            digest=$(cat "$digest_file")
+            echo "Используем дигест из ${digest_file}: ${digest}"
+            sources="${sources} ${IMAGE_NAME}@${digest}"
+          done
+          # Обрезаем ведущий пробел, чтобы результат можно было подставить
+          # через $(cat ...) без лишнего пустого аргумента.
+          echo "${sources# }" > sources.txt
+          cat sources.txt
+
+      - name: Метаданные образа
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Логин в GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Создание мультиархитектурного манифеста
+        run: |
+          docker buildx imagetools create \
+            $(cat /tmp/digests/sources.txt) \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_JSON")
+
+      - name: Загрузка артефакта с итоговым манифестом
+        uses: actions/upload-artifact@v4
+        with:
+          name: metadata
+          path: /tmp/digests/sources.txt
+
+  smoke:
+    name: Проверка запуска
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Подготовка Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Определение числа ядер
+        run: echo "NPROC=$(nproc)" >> "$GITHUB_ENV"
+
+      # Сборка повторно не нужна: забираем кэш, который выгрузил job build.
+      - name: Сборка образа для проверки
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: telegram-bot-api-patched:smoke
+          build-args: |
+            ALPINE_VERSION=${{ env.ALPINE_VERSION }}
+            TGBOTAPI_REF=${{ env.TGBOTAPI_REF }}
+            TGBOTAPI_IDLE_TIMEOUT=${{ env.TGBOTAPI_IDLE_TIMEOUT }}
+            nproc=${{ env.NPROC }}
+          cache-from: type=gha,scope=amd64
+
+      # Проверяем, что бинарник вообще запускается в runtime-образе: без
+      # зависимостей из стадии сборки он упал бы с "error while loading shared
+      # libraries". --version завершает работу с кодом 0 до обращения к Telegram.
+      - name: Проверка бинарника
+        run: |
+          docker run --rm \
+            --entrypoint /usr/local/bin/telegram-bot-api \
+            telegram-bot-api-patched:smoke --version
+
+      # Entrypoint обязан падать, если не заданы обязательные переменные.
+      - name: Проверка entrypoint
+        run: |
+          if docker run --rm \
+            --entrypoint /docker-entrypoint.sh \
+            telegram-bot-api-patched:smoke; then
+            echo "::error::entrypoint не должен стартовать без TELEGRAM_API_ID/TELEGRAM_API_HASH"
+            exit 1
+          fi
+          echo "entrypoint корректно отверг запуск без учётных данных"

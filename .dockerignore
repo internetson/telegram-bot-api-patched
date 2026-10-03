@@ -1,0 +1,20 @@
+# В контекст сборки попадает только то, что реально нужно для Dockerfile.
+# Всё остальное исключаем, чтобы кэш сборки не инвалидировался из-за
+# изменений в README или workflow.
+
+.git
+.github
+.gitignore
+.gitattributes
+
+# Документация и вспомогательные файлы
+*.md
+LICENSE
+docker-compose.yml
+
+# Локальный мусор
+.idea
+.vscode
+*.log
+.env
+.env.*
