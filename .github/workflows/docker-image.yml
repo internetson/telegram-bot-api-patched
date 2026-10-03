@@ -44,25 +44,28 @@ env:
   # inputs пуст при push/pull_request, поэтому нужен запасной вариант.
   TGBOTAPI_REF: ${{ inputs.tgbotapi_ref || 'master' }}
   TGBOTAPI_IDLE_TIMEOUT: ${{ inputs.idle_timeout || '14400' }}
-  # Матрицы сборки. В PR достаточно одной архитектуры, при пуше в main нужны обе.
-  # Раннеры зафиксированы на ubuntu-24.04: метка ubuntu-latest переезжает на
-  # Ubuntu 26, и такое тихое изменение ОС ломает сборки без предупреждения.
-  RUNNER_AMD64: 'ubuntu-24.04'
-  RUNNER_ARM64: 'ubuntu-24.04-arm'
-  MATRIX_PR: '[{"slug":"amd64","platform":"linux/amd64"}]'
-  MATRIX_PUSH: >-
-    [{"slug":"amd64","platform":"linux/amd64"},{"slug":"arm64","platform":"linux/arm64"}]
 
 jobs:
   build:
     name: Сборка ${{ matrix.platform }}
-    runs-on: ${{ matrix.slug == 'arm64' && env.RUNNER_ARM64 || env.RUNNER_AMD64 }}
+    # Раннер приходит из матрицы: контекст env в runs-on недоступен.
+    # Раннеры зафиксированы на ubuntu-24.04 — метка ubuntu-latest 19 октября
+    # 2026 переезжает на Ubuntu 26, и такое тихое изменение ОС ломает сборки.
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 300
 
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(github.event_name == 'pull_request' && env.MATRIX_PR || env.MATRIX_PUSH) }}
+        # Матрица задаётся прямо в выражении: контекст env недоступен в
+        # strategy, а через переменные окружения сюда не подставиться.
+        #
+        # В PR собирается только amd64 — этого достаточно, чтобы проверить
+        # Dockerfile и патч; arm64 проверяется при пуше в main, до публикации
+        # манифеста. Для 32-битного ARM добавьте объект
+        # {"slug":"armv7","platform":"linux/arm/v7","runner":"ubuntu-24.04"}
+        # в оба списка ниже.
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"slug":"amd64","platform":"linux/amd64","runner":"ubuntu-24.04"}]' || '[{"slug":"amd64","platform":"linux/amd64","runner":"ubuntu-24.04"},{"slug":"arm64","platform":"linux/arm64","runner":"ubuntu-24.04-arm"}]') }}
 
     steps:
       - name: Checkout
